@@ -1,0 +1,63 @@
+name: Bouw sonata-grpc.exe
+
+# WAAROM DEZE WORKFLOW BESTAAT
+#
+# Sonata's espeak-ng-submodule stond op rhasspy/espeak-ng@8593723f (2023).
+# Die versie produceert GEEN glijklank (de superscript-j) tussen een hoge
+# klinker en een volgende klinker. De espeak waarop wij ons model trainen
+# (piper1-gpl, espeak-ng@724808c, apr 2026) doet dat WEL.
+#
+# Gevolg: 6 van 23 testzinnen kregen bij inference een andere foneemreeks dan
+# bij training. Het model krijgt dan invoer die het nooit heeft gezien.
+#
+# Gemeten (alle vier de combinaties, zin "me off"):
+#   code=rhasspy(2023)  data=rhasspy(2023)  ->  m,i: 'Qf     geen glide
+#   code=rhasspy(2023)  data=NVDA(2025)     ->  m,i: 'Qf     geen glide  <- SONATA
+#   code=NVDA(2025)     data=rhasspy(2023)  ->  m,i:j 'Qf    WEL glide
+#   code=NVDA(2025)     data=NVDA(2025)     ->  m,i:j 'Qf    WEL glide   <- TRAINING
+#
+# De glide zit dus in de CODE, niet in de data. Sonata geeft NVDA's espeak-DATA
+# wel door (SONATA_ESPEAKNG_DATA_DIRECTORY), maar dat helpt niet: de engine is
+# gecompileerd in sonata-grpc.exe.
+#
+# DE FIX: deps/espeak-ng -> espeak-ng/espeak-ng@724808c (= piper's pin)
+#
+# De pin is een CONTRACT met de training. Werk je piper1-gpl bij, dan moet deze
+# pin meebewegen -- en dan opnieuw trainen, of accepteren dat de fonemen schuiven.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Toon de espeak-pin (moet 724808c zijn)
+        shell: bash
+        run: |
+          cd deps/espeak-ng
+          echo "espeak-ng: $(git log -1 --format='%h %ci %s')"
+          cd ../..
+          grep -A2 espeak .gitmodules
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Bouw sonata-grpc
+        run: cargo build --release --bin sonata-grpc
+
+      - name: Toon het resultaat
+        shell: bash
+        run: |
+          ls -la target/release/sonata-grpc.exe
+          echo "grootte: $(stat -c%s target/release/sonata-grpc.exe) bytes"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sonata-grpc-windows
+          path: target/release/sonata-grpc.exe
