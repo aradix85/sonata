@@ -3,18 +3,18 @@ name: Bouw sonata-grpc.exe
 # WAAROM DEZE WORKFLOW BESTAAT
 #
 # Sonata's espeak-ng-submodule stond op rhasspy/espeak-ng@8593723f (2023).
-# Die versie produceert GEEN glijklank (de superscript-j) tussen een hoge
-# klinker en een volgende klinker. De espeak waarop wij ons model trainen
-# (piper1-gpl, espeak-ng@724808c, apr 2026) doet dat WEL.
+# Die versie produceert GEEN glijklank (superscript-j) tussen een hoge klinker
+# en een volgende klinker. De espeak waarop wij trainen (piper1-gpl,
+# espeak-ng@724808c, apr 2026) doet dat WEL.
 #
 # Gevolg: 6 van 23 testzinnen kregen bij inference een andere foneemreeks dan
 # bij training. Het model krijgt dan invoer die het nooit heeft gezien.
 #
-# Gemeten (alle vier de combinaties, zin "me off"):
-#   code=rhasspy(2023)  data=rhasspy(2023)  ->  m,i: 'Qf     geen glide
-#   code=rhasspy(2023)  data=NVDA(2025)     ->  m,i: 'Qf     geen glide  <- SONATA
-#   code=NVDA(2025)     data=rhasspy(2023)  ->  m,i:j 'Qf    WEL glide
-#   code=NVDA(2025)     data=NVDA(2025)     ->  m,i:j 'Qf    WEL glide   <- TRAINING
+# GEMETEN (alle vier de combinaties, zin "me off"):
+#   code=rhasspy(2023)  data=rhasspy(2023)  ->  geen glide
+#   code=rhasspy(2023)  data=NVDA(2025)     ->  geen glide  <- WAT SONATA DEED
+#   code=NVDA(2025)     data=rhasspy(2023)  ->  WEL glide
+#   code=NVDA(2025)     data=NVDA(2025)     ->  WEL glide   <- WAAROP WIJ TRAINEN
 #
 # De glide zit dus in de CODE, niet in de data. Sonata geeft NVDA's espeak-DATA
 # wel door (SONATA_ESPEAKNG_DATA_DIRECTORY), maar dat helpt niet: de engine is
@@ -48,7 +48,21 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # De `cmake` crate (v0.1.50, 2023) kan de Visual Studio-generator niet
+      # bepalen op een moderne runner:
+      #   "couldn't determine visual studio generator"
+      # Deze actie zet de MSVC-omgeving op (vcvars), waarna cmake wel slaagt.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # Ninja als generator: omzeilt de VS-generator-detectie helemaal.
+      - name: Ninja installeren
+        run: choco install ninja -y
+
       - name: Bouw sonata-grpc
+        env:
+          CMAKE_GENERATOR: Ninja
         run: cargo build --release --bin sonata-grpc
 
       - name: Toon het resultaat
