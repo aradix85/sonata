@@ -60,6 +60,12 @@ jobs:
       - name: Ninja installeren
         run: choco install ninja -y
 
+      # sonata-grpc compileert .proto-bestanden met prost-build -> protoc nodig.
+      # Zonder dit: "Could not find `protoc`" in crates/frontends/grpc/build.rs
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Bouw sonata-grpc
         env:
           CMAKE_GENERATOR: Ninja
