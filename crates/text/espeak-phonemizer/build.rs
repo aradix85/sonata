@@ -19,4 +19,24 @@ fn main() {
         r"cargo:rustc-link-search={}",
         build_dir.join("lib").display()
     );
+
+    // ucd wordt WEL gebouwd (add_library(ucd STATIC ...) in src/ucd-tools/CMakeLists.txt)
+    // maar NIET geinstalleerd: espeak-ng heeft alleen install(TARGETS espeak-ng LIBRARY).
+    // libucd.a / ucd.lib blijft dus in de build-boom achter en staat nooit in lib/.
+    //
+    // Zonder deze extra zoekpaden: "could not find native static library `ucd`".
+    //
+    // De cmake-crate bouwt in {build_dir}/build/. Waar ucd precies landt hangt af van
+    // de generator: multi-config (Visual Studio) zet hem in een Release/-submap,
+    // single-config (Ninja, Make) direct in de doelmap. We geven ze allemaal op --
+    // een niet-bestaand zoekpad is onschadelijk.
+    let ucd = build_dir.join("build").join("src").join("ucd-tools");
+    for pad in [
+        ucd.clone(),                    // Ninja / Make
+        ucd.join("Release"),            // Visual Studio (multi-config)
+        ucd.join("RelWithDebInfo"),
+        build_dir.join("build"),        // vangnet
+    ] {
+        println!(r"cargo:rustc-link-search=native={}", pad.display());
+    }
 }

@@ -71,6 +71,18 @@ jobs:
           CMAKE_GENERATOR: Ninja
         run: cargo build --release --bin sonata-grpc
 
+      # Bij een link-fout: laat zien WAAR de libs werkelijk staan, zodat we niet
+      # hoeven te gokken naar het juiste rustc-link-search-pad.
+      - name: Waar staan de libs? (alleen bij falen)
+        if: failure()
+        shell: bash
+        run: |
+          echo "--- alle .lib/.a onder target/:"
+          find target -name '*.lib' -o -name '*.a' 2>/dev/null | head -30
+          echo ""
+          echo "--- specifiek ucd:"
+          find target -iname '*ucd*' 2>/dev/null | head -10
+
       - name: Toon het resultaat
         shell: bash
         run: |
