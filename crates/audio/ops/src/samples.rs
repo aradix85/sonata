@@ -155,6 +155,48 @@ impl AudioSamples {
             samples[length - i - 1] *= f;
         }
     }
+    /// Splits off the last `overlap` samples, to be overlap-added onto the head
+    /// of the next chunk. Returns the tail; `self` keeps the rest.
+    ///
+    /// The tail is NOT faded here -- fading happens in `overlap_add_head`, so
+    /// that both halves of the seam use complementary (summing-to-unity) gains.
+    pub fn split_tail(&mut self, overlap: usize) -> Vec<f32> {
+        let samples: &mut Vec<f32> = self.0.as_mut();
+        let overlap = overlap.min(samples.len());
+        let split_at = samples.len() - overlap;
+        samples.split_off(split_at)
+    }
+    /// Overlap-add the previous chunk's tail onto the head of this chunk.
+    ///
+    /// Uses an equal-GAIN (linear) crossfade: `fade_in + fade_out == 1` at every
+    /// position, so the summed signal reproduces the original exactly.
+    ///
+    /// This is deliberately NOT the equal-power (sin/cos) curve normally used
+    /// for crossfades. Equal-power is for blending *uncorrelated* signals, where
+    /// power adds but amplitude does not. Here both halves of the seam are the
+    /// SAME audio -- the decoder ran over overlapping mel frames -- so amplitude
+    /// adds directly and sin+cos would peak at sqrt(2), a +3 dB bump at every
+    /// seam. Linear gains sum to unity and reconstruct the waveform perfectly.
+    ///
+    /// The old `crossfade(42)` faded each chunk to silence at both ends and
+    /// concatenated them, leaving a ~50% amplitude dip at every seam -- the
+    /// pops and clicks reported in streaming synthesis.
+    pub fn overlap_add_head(&mut self, tail: &[f32]) {
+        if tail.is_empty() {
+            return;
+        }
+        let samples: &mut Vec<f32> = self.0.as_mut();
+        let overlap = tail.len().min(samples.len());
+        if overlap == 0 {
+            return;
+        }
+        let denom = (overlap - 1).max(1) as f32;
+        for i in 0..overlap {
+            let fade_in = i as f32 / denom;
+            let fade_out = 1.0 - fade_in;
+            samples[i] = samples[i] * fade_in + tail[i] * fade_out;
+        }
+    }
     pub fn lowpass_filter(&mut self, sample_range: std::ops::Range<usize>, fc: f32) {
         let samples: &mut Vec<f32> = self.0.as_mut();
         for i in sample_range {

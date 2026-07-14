@@ -17,6 +17,9 @@ use std::sync::{Arc, RwLock};
 
 const MIN_CHUNK_SIZE: isize = 44;
 const MAX_CHUNK_SIZE: usize = 1024;
+/// Audio samples per mel frame (VITS hop length). Used to convert the chunker's
+/// frame indices into sample offsets.
+const HOP_LENGTH: usize = 256;
 const BOS: char = '^';
 const EOS: char = '$';
 const PAD: char = '_';
@@ -767,6 +770,12 @@ struct SpeechStreamer {
     encoder_outputs: EncoderOutputs,
     mel_chunker: AdaptiveMelChunker,
     one_shot: bool,
+    /// Tail of the previous chunk, kept for overlap-add onto the next one.
+    /// Empty for the first chunk (nothing to blend with yet).
+    prev_tail: Vec<f32>,
+    /// How many samples the seam spans. `chunk_padding` is in mel frames;
+    /// one frame is 256 audio samples (the hop length).
+    overlap_samples: usize,
 }
 
 impl SpeechStreamer {
@@ -788,6 +797,14 @@ impl SpeechStreamer {
             encoder_outputs,
             mel_chunker,
             one_shot,
+            prev_tail: Vec::new(),
+            // Net overlap between consecutive chunks is `chunk_padding` FRAMES.
+            //
+            // The chunker steps back `chunk_padding * 2` frames at the head of
+            // each chunk, but also trims `chunk_padding` frames off the tail of
+            // the previous one (end_padding = -chunk_padding). Those two cancel
+            // out to a single padding's worth of genuinely shared audio.
+            overlap_samples: chunk_padding * HOP_LENGTH,
         }
     }
     fn synthesize_chunk(
@@ -835,7 +852,27 @@ impl SpeechStreamer {
             .ok_or_else(|| SonataError::with_message("Invalid model audio output"))?
             .to_vec()
             .into();
-        audio.crossfade(42);
+
+        // Overlap-add instead of the old `crossfade(42)`.
+        //
+        // The old code faded EVERY chunk to silence at both ends and then
+        // concatenated them. Two fades to zero back to back leave a dip at the
+        // seam -- the audible pop/click reported in streaming synthesis.
+        //
+        // The mel chunker already hands the decoder overlapping frames, so the
+        // head of this chunk and the tail of the previous one describe the SAME
+        // audio. Blending them with an equal-power (sin/cos) pair keeps the
+        // summed power constant, making the seam inaudible.
+        if !self.prev_tail.is_empty() {
+            let tail = std::mem::take(&mut self.prev_tail);
+            audio.overlap_add_head(&tail);
+        }
+        // Hold back this chunk's tail: it gets blended into the next chunk.
+        // Not on the final chunk -- that tail is real audio, not a seam.
+        if self.overlap_samples > 0 && !self.mel_chunker.is_finished() {
+            self.prev_tail = audio.split_tail(self.overlap_samples);
+        }
+
         Ok(audio)
     }
 }
@@ -878,6 +915,11 @@ impl AdaptiveMelChunker {
     fn consume(&mut self) {
         self.last_end_index = None;
     }
+    /// True once the last chunk has been handed out. The final chunk's tail is
+    /// real audio, not a seam, so it must not be held back for overlap-add.
+    fn is_finished(&self) -> bool {
+        self.last_end_index.is_none()
+    }
 }
 
 impl Iterator for AdaptiveMelChunker {
@@ -893,7 +935,17 @@ impl Iterator for AdaptiveMelChunker {
             start_padding = 0;
         } else {
             start_index = last_index - (self.chunk_padding * 2);
-            start_padding = self.chunk_padding;
+            // KEEP the overlap instead of cutting it away.
+            //
+            // The decoder is fed `chunk_padding * 2` frames of overlap on
+            // purpose. The old code sliced `chunk_padding` frames back off the
+            // audio and then faded the remainder to silence at both ends,
+            // leaving a gap at every seam (the streaming pops).
+            //
+            // Keeping those samples lets `overlap_add_head` blend this chunk's
+            // head with the previous chunk's tail -- same audio, complementary
+            // gains, constant power. The seam disappears.
+            start_padding = 0;
         }
         let chunk_end = last_index + chunk_size as isize + self.chunk_padding;
         let remaining_frames = self.num_frames - chunk_end;
@@ -907,7 +959,11 @@ impl Iterator for AdaptiveMelChunker {
         self.step += 1;
         self.last_end_index = end_index;
         let chunk_index = ndarray::Slice::new(start_index, end_index, 1);
-        let audio_index = ndarray::Slice::new(start_padding * 256, end_padding.map(|i| i * 256), 1);
+        let audio_index = ndarray::Slice::new(
+            start_padding * HOP_LENGTH as isize,
+            end_padding.map(|i| i * HOP_LENGTH as isize),
+            1,
+        );
         Some((chunk_index, audio_index))
     }
 }
