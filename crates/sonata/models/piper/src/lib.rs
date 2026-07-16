@@ -20,9 +20,13 @@ const MAX_CHUNK_SIZE: usize = 1024;
 /// Audio samples per mel frame (VITS hop length). Used to convert the chunker's
 /// frame indices into sample offsets.
 const HOP_LENGTH: usize = 256;
-const BOS: char = '^';
-const EOS: char = '$';
-const PAD: char = '_';
+const BOS: &str = "^";
+const EOS: &str = "$";
+const PAD: &str = "_";
+/// Longest phoneme key (in `char`s) we expect in a `phoneme_id_map`. piper1-gpl
+/// writes multi-codepoint IPA units such as the diphthongs aɪ aʊ ɔɪ eɪ oʊ as a
+/// single key. Greedy matching tries this many chars first, then shrinks.
+const MAX_PHONEME_CHARS: usize = 4;
 
 #[inline(always)]
 fn reversed_mapping<K, V>(input: &HashMap<K, V>) -> HashMap<V, K>
@@ -147,17 +151,28 @@ pub struct Language {
 pub struct ModelConfig {
     pub key: Option<String>,
     pub language: Option<Language>,
+    #[serde(default)]
     pub audio: AudioConfig,
+    #[serde(default)]
     pub num_speakers: u32,
+    #[serde(default)]
     pub speaker_id_map: HashMap<String, i64>,
     streaming: Option<bool>,
+    #[serde(default)]
     espeak: ESpeakConfig,
+    #[serde(default)]
     inference: InferenceConfig,
+    // piper1-gpl configs omit these; they are never read (reverse map / symbol
+    // count), so default them instead of demanding they be present. Without the
+    // defaults, a modern piper1-gpl voice fails to load with
+    // "missing field `phoneme_map`".
     #[allow(dead_code)]
+    #[serde(default)]
     num_symbols: u32,
     #[allow(dead_code)]
-    phoneme_map: HashMap<i64, char>,
-    phoneme_id_map: HashMap<char, Vec<i64>>,
+    #[serde(default)]
+    phoneme_map: HashMap<i64, String>,
+    phoneme_id_map: HashMap<String, Vec<i64>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -175,9 +190,9 @@ trait VitsModelCommons {
     fn get_tashkeel_engine(&self) -> Option<&libtashkeel_core::DynamicInferenceEngine>;
     fn get_meta_ids(&self) -> (i64, i64, i64) {
         let config = self.get_config();
-        let pad_id = *config.phoneme_id_map.get(&PAD).unwrap().first().unwrap();
-        let bos_id = *config.phoneme_id_map.get(&BOS).unwrap().first().unwrap();
-        let eos_id = *config.phoneme_id_map.get(&EOS).unwrap().first().unwrap();
+        let pad_id = *config.phoneme_id_map.get(PAD).unwrap().first().unwrap();
+        let bos_id = *config.phoneme_id_map.get(BOS).unwrap().first().unwrap();
+        let eos_id = *config.phoneme_id_map.get(EOS).unwrap().first().unwrap();
         (pad_id, bos_id, eos_id)
     }
     fn language(&self) -> Option<String> {
@@ -242,12 +257,42 @@ trait VitsModelCommons {
         let config = self.get_config();
         let mut phoneme_ids: Vec<i64> = Vec::with_capacity((phonemes.len() + 1) * 2);
         phoneme_ids.push(bos_id);
-        for phoneme in phonemes.chars() {
-            if let Some(id) = config.phoneme_id_map.get(&phoneme) {
-                phoneme_ids.push(*id.first().unwrap());
-                phoneme_ids.push(pad_id);
+
+        // Greedy longest-match over the phoneme string.
+        //
+        // eSpeak returns a flat char stream: the diphthong in "eye" arrives as
+        // 'a' followed by 'ɪ', two separate chars. But piper1-gpl trains those
+        // as ONE token ("aɪ" -> a single id). Matching char-by-char would look
+        // up 'a' and 'ɪ' individually and never hit the diphthong id the model
+        // was trained on, mispronouncing every English word that uses one.
+        //
+        // So at each position we try the longest key first (up to
+        // MAX_PHONEME_CHARS) and shrink until a key matches. Legacy single-char
+        // maps are unaffected: with no multi-char keys present, the length-1
+        // attempt is the only one that ever matches, exactly as before.
+        let chars: Vec<char> = phonemes.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            let remaining = chars.len() - i;
+            let mut matched = false;
+            let max_len = remaining.min(MAX_PHONEME_CHARS);
+            for len in (1..=max_len).rev() {
+                let candidate: String = chars[i..i + len].iter().collect();
+                if let Some(id) = config.phoneme_id_map.get(&candidate) {
+                    phoneme_ids.push(*id.first().unwrap());
+                    phoneme_ids.push(pad_id);
+                    i += len;
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                // No key for this char at any length; skip it, as the old
+                // char-by-char loop did for unmapped characters.
+                i += 1;
             }
         }
+
         phoneme_ids.push(eos_id);
         phoneme_ids
     }
